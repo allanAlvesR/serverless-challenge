@@ -1,0 +1,168 @@
+org: aalves
+app: serverless-challenge
+service: serverless-challenge
+plugins:
+  - serverless-iam-roles-per-function
+  - serverless-python-requirements
+
+frameworkVersion: ">=1.1.0"
+  
+provider:
+  name: aws
+  runtime: python3.8
+  profile: default
+  region: sa-east-1
+  environment:
+    DYNAMODB_TABLE: ${self:service}-${opt:stage, self:provider.stage}
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - logs:CreateLogGroup
+        - logs:CreateLogStream
+        - logs:PutLogEvents
+      Resource: "arn:aws:logs:*:*:*"
+  apiGateway:
+    binaryMediaTypes:
+      - '*/*'
+      
+functions:
+  extractMetadata:
+    handler: extractMetadata.extractMetadata
+    description: Chamada quando um novo arquivo é carregado no bucket para extrair metadados do item e armazenar os metadados no DB
+    memorySize: 128
+    timeout: 30
+    events:
+      - s3:
+          bucket: ${self:service}-${opt:stage, self:provider.stage}-bucket
+          event: s3:ObjectCreated:*
+          rules:
+            - prefix: uploads/
+            - suffix: .jpg
+      - http:
+          path: extractMetadata
+          method: post
+          private: true
+          integration: lambda
+    iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:PutItem
+      Resource: "arn:aws:dynamodb:${opt:region, self:provider.region}:*:table/${self:provider.environment.DYNAMODB_TABLE}"
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+        - s3:HeadObject
+      Resource: 
+        - "arn:aws:s3:::${self:service}-${opt:stage, self:provider.stage}-bucket/*"
+        - "arn:aws:s3:::${self:service}-${opt:stage, self:provider.stage}-bucket"
+    layers: 
+      - arn:aws:lambda:${self:provider.region}:770693421928:layer:Klayers-python38-Pillow:14
+
+  getMetadata:
+    handler: getMetadata.getMetadata
+    description: Recebe a requisição de um endpoint criado pelo AWS API Gateway. Ela irá receber o parâmetro s3objectkey e retornar os metadados armazenados no DynamoDB.
+    memorySize: 128
+    timeout: 30
+    events:
+      - http:
+          path: images/getMetadata/{s3objectkey}
+          method: get
+          cors: true
+          request:
+            parameters:
+              paths:
+                s3objectkey: true
+    iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:Query
+      Resource: "arn:aws:dynamodb:${opt:region, self:provider.region}:*:table/${self:provider.environment.DYNAMODB_TABLE}"
+
+  getImage:
+    handler: getImage.getImage
+    description: Recebe como parâmetro o s3objectkey e faz o download da imagem.
+    memorySize: 128
+    timeout: 30
+    events:
+      - http:
+          path: images/getImage/{s3objectkey}
+          method: GET
+          cors: true
+          request:
+            parameters:
+              paths:
+                s3objectkey: true
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - s3:GetObject
+          - s3:HeadObject
+        Resource: 
+          - "arn:aws:s3:::${self:service}-${opt:stage, self:provider.stage}-bucket/*"
+          - "arn:aws:s3:::${self:service}-${opt:stage, self:provider.stage}-bucket"
+
+  infoImages:
+    handler: infoImages.infoImages
+    description: pesquisa os metadados salvos no DynamoDB e retorna a imagem com maior e menor tamanho, tipo de imagens e qtd de cada tipo.
+    memorySize: 128
+    timeout: 30
+    events:
+      - http:
+          path: images/infoImages
+          method: GET
+          cors: true
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:Query
+        Resource: 
+          - "arn:aws:dynamodb:${opt:region, self:provider.region}:*:table/${self:provider.environment.DYNAMODB_TABLE}"
+          - "arn:aws:dynamodb:${opt:region, self:provider.region}:*:table/${self:provider.environment.DYNAMODB_TABLE}/index/*"
+resources:
+  Resources:
+    ImagesDynamoDbTable:
+      Type: 'AWS::DynamoDB::Table'
+      Properties:
+        TableName: ${self:provider.environment.DYNAMODB_TABLE}
+        AttributeDefinitions:
+          - AttributeName: filename
+            AttributeType: S
+          - AttributeName: contentlength
+            AttributeType: N
+          - AttributeName: folder
+            AttributeType: S
+          - AttributeName: contenttype
+            AttributeType: S
+        KeySchema:       
+          - AttributeName: filename
+            KeyType: HASH
+          - AttributeName: contentlength
+            KeyType: RANGE
+        ProvisionedThroughput:
+          ReadCapacityUnits: 1
+          WriteCapacityUnits: 1
+        GlobalSecondaryIndexes:
+          - IndexName: ${self:provider.environment.DYNAMODB_TABLE}_GSI1
+            KeySchema:
+              - AttributeName: folder
+                KeyType: HASH
+              - AttributeName: contentlength
+                KeyType: RANGE
+            Projection:
+              NonKeyAttributes: [filename]
+              ProjectionType: INCLUDE
+            ProvisionedThroughput:
+              ReadCapacityUnits: 1
+              WriteCapacityUnits: 1
+          - IndexName: ${self:provider.environment.DYNAMODB_TABLE}_GSI2
+            KeySchema:
+              - AttributeName: folder
+                KeyType: HASH
+              - AttributeName: contenttype
+                KeyType: RANGE
+            Projection:
+              NonKeyAttributes: [filename]
+              ProjectionType: INCLUDE
+            ProvisionedThroughput:
+              ReadCapacityUnits: 1
+              WriteCapacityUnits: 1
